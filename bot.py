@@ -10,7 +10,6 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 
 MY_TAG = "iexclusiveoff-21"
 
-# إعدادات التصفح لمحاكاة المتصفح وتجنب حظر أمازون
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
     "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -29,7 +28,6 @@ def run_web_server():
     server.serve_forever()
 
 def build_affiliate_url(url: str) -> str:
-    """إضافة كود التتبع tag=iexclusiveoff-21 للرابط"""
     parsed = urlparse(url)
     query_params = parse_qs(parsed.query)
     query_params['tag'] = [MY_TAG]
@@ -39,17 +37,15 @@ def build_affiliate_url(url: str) -> str:
     return urlunparse(parsed._replace(query=new_query))
 
 def scrape_single_product(url: str):
-    """جلب تفاصيل المنتج الفردي (العنوان، الصورة، رابط الإحالة)"""
+    """جلب تفاصيل المنتج الفردي بدقة (العنوان، الصورة، الرابط)"""
     try:
         clean_url = build_affiliate_url(url)
         res = requests.get(clean_url, headers=HEADERS, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # استخراج العنوان
         title_elem = soup.find(id="productTitle")
         title = title_elem.get_text().strip() if title_elem else "منتج مميز من أمازون"
         
-        # استخراج الصورة الرئيسية
         img_url = None
         img_elem = soup.find(id="landingImage") or soup.find(id="imgBlkFront")
         if img_elem:
@@ -65,31 +61,35 @@ def scrape_single_product(url: str):
         return None
 
 def extract_products_from_event_page(url: str):
-    """استخراج جميع المنتجات من صفحة الفعاليات/العروض"""
+    """استخراج جميع المنتجات من صفحة العروض مع جلب تفاصيلها الحقيقية"""
     products = []
     try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
+        res = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # البحث عن كل الأكواد (ASIN) داخل الصفحة
-        asins = set(re.findall(r'/dp/([A-Z0-9]{10})', res.text))
-        
+        # البحث عن كل أكواد ASIN الفريدة في الصفحة بالكامل بدون تقييد بـ 10 فقط
+        asins = list(set(re.findall(r'/dp/([A-Z0-9]{10})', res.text)))
         domain = urlparse(url).netloc or "www.amazon.eg"
         
-        for asin in list(asins)[:10]:  # معالجة أول 10 منتجات لعدم استهلاك الموارد بكثرة
-            prod_url = f"https://{domain}/dp/{asin}?tag={MY_TAG}"
-            # استخراج العناوين أو الصور إن أمكن من الصفحة العامة
-            products.append({
-                'title': f"عرض خاص على منتج أمازون ({asin})",
-                'link': prod_url,
-                'image': None
-            })
+        # نقوم بمعالجة المنتجات (نحدد حد أقصى أماناً 25 منتجاً حتى لا يتأخر البوت كثيراً في الرد)
+        for asin in asins[:25]:
+            prod_url = f"https://{domain}/dp/{asin}"
+            # جلب تفاصيل كل منتج لضمان الحصول على اسمه الحقيقي
+            prod_data = scrape_single_product(prod_url)
+            if prod_data and prod_data['title'] != "منتج مميز من أمازون":
+                products.append(prod_data)
+            else:
+                products.append({
+                    'title': f"عرض مميز من أمازون",
+                    'link': build_affiliate_url(prod_url),
+                    'image': None
+                })
     except Exception as e:
         print(f"Error scraping event page: {e}")
     return products
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً بك! أرسل لي رابط منتج أو صفحة عروض من أمازون، وسأقوم بإنشاء البوستات التسويقية الجاهزة فوراً.")
+    await update.message.reply_text("أهلاً بك! أرسل لي رابط منتج فردي أو صفحة عروض، وسأقوم بتجهيز البوستات التسويقية فوراً.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -101,29 +101,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text.startswith('http'):
         text = 'https://' + text
 
-    msg = await update.message.reply_text("⏳ جاري قراءة الرابط وتجهيز البوست التسويقي...")
+    msg = await update.message.reply_text("⏳ جاري قراءة الروابط وجلب تفاصيل المنتجات...")
 
-    # حالة صفحة العروض / الفعاليات (مثل events/double11)
-    if "/events/" in text or "promotions" in text:
+    # التحقق مما إذا كانت صفحة عروض أو فعاليات
+    if "/events/" in text or "promotions" in text or "ref_=nav_cs" in text:
         products = extract_products_from_event_page(text)
+        await msg.delete()
+        
         if not products:
             aff_link = build_affiliate_url(text)
-            await msg.edit_text(f"🔥 **صفحة عروض وتخفيضات خاصة:**\n\n🔗 {aff_link}")
+            await update.message.reply_text(f"🔥 **رابط صفحة العروض:**\n\n{aff_link}")
             return
         
-        await msg.edit_text(f"✅ تم العثور على {len(products)} منتج! جاري إرسال البوستات...")
+        await update.message.reply_text(اغرف={`✅ تم العثور على ${len(products)} منتج في الصفحة، جاري إرسالها:`})
         
         for prod in products:
-            caption = f"🔥 **عرض خاص ومميز!**\n\n📌 {prod['title']}\n\n🛒 **اطلبه الآن من هنا:**\n{prod['link']}"
+            caption = f"🔥 **عرض خاص ومميز!**\n\n📌 {prod['title']}\n\n🛒 **اطلبه الآن من هنا:**\n`{prod['link']}`"
+            
+            if prod.get('image'):
+                try:
+                    await update.message.reply_photo(photo=prod['image'], caption=caption, parse_mode="Markdown")
+                    continue
+                except Exception:
+                    pass
             await update.message.reply_text(caption, parse_mode="Markdown")
             
-    # حالة رابط منتج واحد (dp/ أو gp/product/)
     else:
         prod_data = scrape_single_product(text)
         await msg.delete()
         
         if prod_data:
-            caption = f"🔥 **عرض خاص على {prod_data['title']}**\n\n🛒 **للشراء والطلب عبر الرابط التالي:**\n`{prod_data['link']}`"
+            caption = f"🔥 **عرض خاص ومميز!**\n\n📌 {prod_data['title']}\n\n🛒 **اطلبه الآن من هنا:**\n`{prod_data['link']}`"
             
             if prod_data['image']:
                 try:
