@@ -8,11 +8,11 @@ from telegram.ext import (ApplicationBuilder, MessageHandler,
                           CallbackQueryHandler, ContextTypes, filters)
 
 # ====== الإعدادات (كلها بتتقرأ من Railway Variables) ======
-BOT_TOKEN      = os.getenv("BOT_TOKEN")
-GEMINI_KEY     = os.getenv("GEMINI_API_KEY")
-AFFILIATE_TAG  = os.getenv("AFFILIATE_TAG")
-TARGET_CHANNEL = os.getenv("TARGET_CHANNEL")
-OWNER_ID       = int(os.getenv("OWNER_ID", "0"))
+BOT_TOKEN      = os.getenv("9228837127:AAFaxi5uhae1pQQ6eHVeqQmGOEknp_Tgug8")
+GEMINI_KEY     = os.getenv("AQ.Ab8RN6Kw0c-iwS367dCAQ8W1tso9DDDcNAun19LPZnUsM6O8Cw")
+AFFILIATE_TAG  = os.getenv("iexclusiveoff-21")
+TARGET_CHANNEL = os.getenv("@iNew_Amazon_Offers")
+OWNER_ID       = int(os.getenv("1424198706", "0"))
 TEXT_MODEL     = os.getenv("TEXT_MODEL", "gemini-2.5-flash")
 IMAGE_MODEL    = os.getenv("IMAGE_MODEL", "gemini-2.5-flash-image")
 
