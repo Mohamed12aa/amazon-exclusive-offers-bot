@@ -1,370 +1,256 @@
-import os
-import re
-import json
-import html
-import time
-import random
 import asyncio
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+import io
+import os
+import random
+import re
+import uuid
 
 import requests
 from bs4 import BeautifulSoup
-from telegram import Update
-from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from dotenv import load_dotenv
+from google import genai
+from PIL import Image
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (Application, CallbackQueryHandler, ContextTypes,
+                          MessageHandler, filters)
 
-# ----------------------------- الإعدادات -----------------------------
-MY_TAG = os.getenv("AFFILIATE_TAG", "iexclusiveoff-21")
-MAX_PRODUCTS = int(os.getenv("MAX_PRODUCTS", "8"))          # أقصى عدد منتجات من صفحة عروض
-SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")               # اختياري: لتخطي حظر أمازون
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")           # اختياري: لكتابة إعلان قوي بالذكاء الاصطناعي
-SHOW_PRICE = os.getenv("SHOW_PRICE", "0") == "1"             # إظهار السعر (راجع شروط أمازون)
+load_dotenv()
+
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+AFFILIATE_TAG = os.environ["AFFILIATE_TAG"]
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
+OWNER_ID = os.environ.get("OWNER_ID", "")
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")
+TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
+IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+MAX_PRODUCTS = int(os.environ.get("MAX_PRODUCTS", "10"))
+DOMAIN = "https://www.amazon.eg"
+
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ar,en;q=0.8",
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+    "Accept-Language": "ar-EG,ar;q=0.9,en;q=0.8",
 }
 
-URL_RE = re.compile(
-    r"(?:https?://)?(?:[\w-]+\.)*(?:amazon\.[a-z]{2,3}(?:\.[a-z]{2})?|amzn\.to|amzn\.eu|a\.co)(?:/\S*)?",
-    re.I,
-)
-ASIN_RE = re.compile(r"/(?:dp|gp/product|gp/aw/d|product)/([A-Z0-9]{10})", re.I)
-SHORT_HOSTS = ("amzn.to", "amzn.eu", "a.co")
-
-HOOKS = [
-    "🔥 لقطة اليوم من أمازون!",
-    "⚡ عرض لفترة محدودة.. لا تفوّت الفرصة!",
-    "💎 صفقة تستاهل التجربة!",
-    "🚀 من أكتر المنتجات طلباً دلوقتي!",
-    "🎯 اغتنم الفرصة ووفّر الآن!",
-    "🌟 عرض مميز أُضيف حديثاً!",
-    "💡 منتج عملي مش هتستغنى عنه!",
-    "👑 اخترنا لك الأفضل النهاردة!",
-    "💥 تخفيض قوي.. الحق قبل ما يخلص!",
-    "✨ سهّل حياتك مع المنتج ده!",
+STYLES = [
+    "ابدأ بسؤال يلفت الانتباه",
+    "احكي قصة قصيرة من موقف يومي بسيط",
+    "اعرض المنتج كحل لمشكلة شائعة",
+    "استخدم أسلوب حماسي وعرض حصري",
+    "أسلوب هادئ وراقي يركز على الجودة",
+    "ابدأ بجملة مفاجئة ثم اشرح الفائدة",
+    "أسلوب صديق بينصح صاحبه",
+    "استخدم إحساس بالإلحاح بدون ذكر أسعار أو نسب خصم",
 ]
 
-
-# ----------------------- سيرفر صغير للـ Railway -----------------------
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Bot is alive and running!")
-
-    def log_message(self, *args):
-        pass
+DISCLOSURE = "\n\n(بصفتي شريك في برنامج عمولات أمازون، أحصل على عمولة من المشتريات المؤهلة)"
 
 
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    HTTPServer(("0.0.0.0", port), SimpleHandler).serve_forever()
+def fetch(url: str) -> str:
+    if SCRAPER_API_KEY:
+        r = requests.get("http://api.scraperapi.com",
+                         params={"api_key": SCRAPER_API_KEY, "url": url},
+                         timeout=70)
+    else:
+        r = requests.get(url, headers=HEADERS, timeout=25)
+    r.raise_for_status()
+    return r.text
 
 
-# ----------------------------- أدوات الروابط -----------------------------
-def resolve_url(url: str) -> str:
-    """يفك الروابط المختصرة (amzn.to / a.co) ويرجع الرابط الحقيقي."""
-    host = urlparse(url).netloc.lower()
-    if any(host == h or host.endswith("." + h) for h in SHORT_HOSTS):
+def resolve(url: str) -> str:
+    if re.search(r"amzn\.(to|eu)|a\.co", url):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=15, allow_redirects=True, stream=True)
-            final = r.url
-            r.close()
-            return final
-        except Exception as e:
-            print("Resolve error:", e)
+            return requests.head(url, headers=HEADERS, allow_redirects=True,
+                                 timeout=15).url
+        except Exception:
+            return url
     return url
 
 
-def normalize_host(host: str) -> str:
-    return re.sub(r"^.*?(amazon\.)", r"www.amazon.", host.lower())
+def get_asin(url: str):
+    m = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url)
+    return m.group(1) if m else None
 
 
-def affiliate_url(host: str, asin: str) -> str:
-    # رابط نظيف: أي رابط إحالة تاني بيتشال تماماً ويتحط رابطك
-    return f"https://{host}/dp/{asin}?tag={MY_TAG}"
+def affiliate_link(asin: str) -> str:
+    return f"{DOMAIN}/dp/{asin}?tag={AFFILIATE_TAG}"
 
 
-def is_blocked(text: str) -> bool:
-    t = text[:30000].lower()
-    return ("validatecaptcha" in t
-            or "enter the characters you see" in t
-            or "api-services-support@amazon.com" in t)
-
-
-LAST_REASON = {"msg": ""}
-
-
-def fetch_html(url: str):
-    """يجيب الصفحة مباشرة، ولو أمازون حجبت يجرب ScraperAPI (لو متفعّل)."""
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        if r.status_code == 200 and not is_blocked(r.text):
-            return r.text
-        reason = f"أمازون رجّعت كود {r.status_code}" + (" (صفحة captcha)" if is_blocked(r.text) else "")
-        LAST_REASON["msg"] = reason
-        print("Direct fetch failed:", reason, url)
-    except Exception as e:
-        LAST_REASON["msg"] = f"خطأ اتصال: {e}"
-        print("Direct fetch error:", e)
-
-    if SCRAPER_API_KEY:
-        try:
-            r = requests.get(
-                "https://api.scraperapi.com/",
-                params={"api_key": SCRAPER_API_KEY, "url": url},
-                timeout=70,
-            )
-            if r.status_code == 200 and not is_blocked(r.text):
-                return r.text
-            LAST_REASON["msg"] = f"ScraperAPI رجّع كود {r.status_code}"
-            print("Scraper failed:", r.status_code, r.text[:200])
-        except Exception as e:
-            LAST_REASON["msg"] = f"خطأ ScraperAPI: {e}"
-            print("Scraper fetch error:", e)
-    return None
-
-
-def microlink_product(host: str, asin: str):
-    """بديل احتياطي لو أمازون حجبت: Microlink (مع فلترة النتائج الغلط)."""
-    try:
-        r = requests.get("https://api.microlink.io", params={"url": f"https://{host}/dp/{asin}"}, timeout=25)
-        d = r.json()
-        if d.get("status") != "success":
-            LAST_REASON["msg"] += f" | Microlink: {d.get('message', 'فشل')}"
-            return None
-        item = d.get("data", {})
-        title = (item.get("title") or "").strip()
-        bad = ("robot check", "sorry", "page not found", "captcha", "عذراً", "عذرا")
-        if not title or any(b in title.lower() for b in bad) or len(title) < 8:
-            LAST_REASON["msg"] += " | Microlink رجّع عنوان غير صالح"
-            return None
-        title = re.sub(r"^Amazon\.[a-z.]+\s*:\s*", "", title, flags=re.I)
-        img = (item.get("image") or {}).get("url")
-        if img and "/images/I/" not in img:   # يرفض اللوجو وأي صورة مش للمنتج
-            img = None
-        return {"asin": asin, "title": title, "image": img, "price": None, "link": affiliate_url(host, asin)}
-    except Exception as e:
-        LAST_REASON["msg"] += f" | Microlink error: {e}"
-        return None
-
-
-# ----------------------------- قراءة المنتج -----------------------------
-def pick_image(soup: BeautifulSoup):
-    img = soup.select_one("#landingImage, #imgBlkFront, #main-image")
-    if img:
-        dyn = img.get("data-a-dynamic-image")
-        if dyn:
-            try:
-                sizes = json.loads(dyn)
-                return max(sizes.items(), key=lambda kv: kv[1][0] * kv[1][1])[0]  # أكبر نسخة
-            except Exception:
-                pass
-        for attr in ("data-old-hires", "src"):
-            v = img.get(attr)
-            if v and v.startswith("http"):
-                return v
-    og = soup.find("meta", property="og:image")
-    if og and og.get("content") and "logo" not in og["content"].lower():
-        return og["content"]
-    return None
-
-
-def get_product(host: str, asin: str):
-    page = fetch_html(f"https://{host}/dp/{asin}")
-    if not page:
-        return microlink_product(host, asin)
-    soup = BeautifulSoup(page, "html.parser")
-
+def scrape_product(asin: str) -> dict:
+    html = fetch(f"{DOMAIN}/dp/{asin}")
+    soup = BeautifulSoup(html, "html.parser")
     t = soup.select_one("#productTitle")
-    title = t.get_text(" ", strip=True) if t else None
+    title = t.get_text(strip=True) if t else ""
     if not title:
         og = soup.find("meta", property="og:title")
-        title = og["content"].strip() if og and og.get("content") else None
-    if not title:
-        LAST_REASON["msg"] = "الصفحة اتحملت بس مفيهاش عنوان منتج"
-        return microlink_product(host, asin)
-
-    price = None
-    if SHOW_PRICE:
-        p = soup.select_one("#corePrice_feature_div .a-offscreen, span.a-price .a-offscreen")
-        price = p.get_text(strip=True) if p else None
-
-    return {
-        "asin": asin,
-        "title": title,                       # العنوان كامل بدون قص
-        "image": pick_image(soup),
-        "price": price,
-        "link": affiliate_url(host, asin),
-    }
+        title = og["content"] if og else ""
+    img_url = None
+    img = soup.select_one("#landingImage")
+    if img:
+        img_url = img.get("data-old-hires") or img.get("src")
+    if not img_url:
+        og = soup.find("meta", property="og:image")
+        img_url = og["content"] if og else None
+    bullets = [li.get_text(strip=True)
+               for li in soup.select("#feature-bullets li")][:5]
+    if not title or not img_url:
+        raise RuntimeError("تعذر قراءة الصفحة (ممكن أمازون حظرت الطلب)")
+    img_bytes = requests.get(img_url, headers=HEADERS, timeout=25).content
+    return {"asin": asin, "title": title, "bullets": bullets,
+            "image": img_bytes}
 
 
-def extract_asins(page: str):
-    """يطلع كل الـ ASIN من صفحة عروض/بحث/قائمة بالترتيب بدون تكرار."""
-    found = []
-    soup = BeautifulSoup(page, "html.parser")
-    for a in soup.find_all("a", href=True):
-        m = ASIN_RE.search(a["href"])
-        if m:
-            found.append(m.group(1).upper())
-    for m in re.finditer(r'data-asin="([A-Z0-9]{10})"', page):
-        found.append(m.group(1))
-    seen, out = set(), []
-    for x in found:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
+def find_asins(url: str) -> list:
+    html = fetch(url)
+    asins = []
+    for a in re.findall(r"/(?:dp|gp/product)/([A-Z0-9]{10})", html):
+        if a not in asins:
+            asins.append(a)
+    return asins[:MAX_PRODUCTS]
 
 
-def collect_products(url: str):
-    url = resolve_url(url)
-    host = normalize_host(urlparse(url).netloc)
-    m = ASIN_RE.search(url)
-
-    if m:
-        asins = [m.group(1).upper()]
-    else:
-        page = fetch_html(url)
-        asins = extract_asins(page)[:MAX_PRODUCTS] if page else []
-
-    products = []
-    for asin in asins:
-        p = get_product(host, asin)
-        if p:
-            products.append(p)
-        if len(asins) > 1:
-            time.sleep(random.uniform(1.0, 2.0))   # عشان أمازون ما تحجبناش
-    return products
-
-
-# ----------------------------- كتابة الإعلان -----------------------------
-def ai_ad(title: str):
-    if not ANTHROPIC_API_KEY:
-        return None
+def make_ad_text(p: dict) -> str:
+    style = random.choice(STYLES)
     prompt = (
-        "اكتب إعلاناً تسويقياً قصيراً وقوياً بالعربية (بلهجة بيضاء مفهومة) لقناة تيليجرام عن المنتج التالي.\n"
-        "الشروط: من 2 إلى 3 أسطر فقط، يبدأ بجملة جذب قوية، يذكر أهم فائدة مفهومة من اسم المنتج، "
-        "مع إيموجي مناسب، وينتهي بدعوة للشراء.\n"
-        "ممنوع: اختراع مواصفات أو أسعار أو نسب خصم غير موجودة في الاسم، وممنوع كتابة اسم المنتج أو أي رابط.\n"
-        "اكتب نص الإعلان فقط بدون أي مقدمة.\n\n"
-        f"اسم المنتج: {title}"
+        "اكتب إعلان قصير (4 إلى 6 أسطر) بالعامية المصرية لمنتج من أمازون مصر.\n"
+        f"الأسلوب: {style}.\n"
+        "اذكر مزايا حقيقية من البيانات فقط، ولا تذكر أي سعر أو نسبة خصم "
+        "أو ادعاء غير موجود. اختم بدعوة لمشاهدة التفاصيل من الرابط. "
+        "استخدم إيموجي بشكل خفيف. لا تكتب الرابط.\n\n"
+        f"العنوان: {p['title']}\nالمميزات: {' | '.join(p['bullets'])}"
     )
-    try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-haiku-5-5",
-                "max_tokens": 300,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=30,
-        )
-        text = r.json()["content"][0]["text"].strip()
-        return text[:500] or None
-    except Exception as e:
-        print("AI ad error:", e)
-        return None
+    r = client.models.generate_content(model=TEXT_MODEL, contents=prompt)
+    return (r.text or "").strip()
 
 
-def build_caption(p: dict) -> str:
-    body = ai_ad(p["title"]) or random.choice(HOOKS)
-    lines = [html.escape(body), "", f"📌 <b>{html.escape(p['title'])}</b>"]
-    if p.get("price"):
-        lines.append(f"💰 {html.escape(p['price'])}")
-    lines += ["", f'🛒 <a href="{html.escape(p["link"], quote=True)}">اطلبه الآن من أمازون</a>']
-    return "\n".join(lines)
-
-
-def download_image(url: str):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
-            return r.content
-    except Exception as e:
-        print("Image download error:", e)
+def make_ad_image(p: dict):
+    prompt = (
+        "Use the provided product image as the exact reference. Do NOT modify "
+        "the product in any way: keep its shape, colors, logo, text, labels "
+        "and packaging identical. Only change the background, lighting and "
+        "surrounding scene to create a professional, eye-catching "
+        "advertising image. No added text, no watermarks, no extra logos. "
+        "Square 1:1."
+    )
+    ref = Image.open(io.BytesIO(p["image"]))
+    r = client.models.generate_content(model=IMAGE_MODEL,
+                                       contents=[prompt, ref])
+    for part in r.candidates[0].content.parts:
+        if getattr(part, "inline_data", None) and part.inline_data.data:
+            return part.inline_data.data
     return None
 
 
-# ----------------------------- تيليجرام -----------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "أهلاً بك! 👋\nابعتلي رابط منتج أمازون، أو رابط صفحة عروض فيها منتجات كتير، "
-        "وأنا هجهز لك إعلان لكل منتج بالصورة والعنوان الكامل ورابط الإحالة بتاعك."
-    )
-
-
-async def send_product(update: Update, p: dict):
-    caption = build_caption(p)
-    img = await asyncio.to_thread(download_image, p["image"]) if p.get("image") else None
-
-    if img:
-        try:
-            if len(caption) <= 1024:  # حد تيليجرام لكابشن الصورة
-                await update.message.reply_photo(photo=img, caption=caption, parse_mode=ParseMode.HTML)
-            else:
-                await update.message.reply_photo(photo=img)
-                await update.message.reply_text(caption, parse_mode=ParseMode.HTML)
-            return
-        except Exception as e:
-            print("Photo send error:", e)
-
-    await update.message.reply_text(caption, parse_mode=ParseMode.HTML)
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").strip()
-    urls = [u.rstrip(".,)،") for u in URL_RE.findall(text)]
-    urls = [u if u.lower().startswith("http") else "https://" + u for u in urls]
-
-    if not urls:
-        await update.message.reply_text("من فضلك أرسل رابط أمازون صالح.")
-        return
-
-    status = await update.message.reply_text("⏳ جاري قراءة المنتجات وتجهيز الإعلانات...")
-    total = 0
-
-    for url in urls:
-        products = await asyncio.to_thread(collect_products, url)
-        for p in products:
-            await send_product(update, p)
-            total += 1
-            await asyncio.sleep(0.6)  # تجنب حدود الإرسال في تيليجرام
-
+def build_post(p: dict):
+    text = make_ad_text(p)
     try:
-        await status.delete()
-    except Exception:
-        pass
+        img = make_ad_image(p) or p["image"]
+    except Exception as e:
+        print("image gen failed:", e)
+        img = p["image"]
+    caption = f"{text}\n\n🛒 اطلبه من هنا:\n{affiliate_link(p['asin'])}{DISCLOSURE}"
+    return img, caption[:1024]
 
-    if total == 0:
-        await update.message.reply_text(
-            "❌ معرفتش أقرا بيانات المنتج.\n"
-            f"السبب: {LAST_REASON['msg'] or 'الرابط مش لمنتج أو صفحة عروض ما فيهاش منتجات ظاهرة'}"
-        )
+
+def keyboard(pid: str):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ انشر في القناة", callback_data=f"pub:{pid}"),
+        InlineKeyboardButton("🔄 أعد التوليد", callback_data=f"regen:{pid}"),
+    ]])
+
+
+def allowed(update: Update) -> bool:
+    u = update.effective_user
+    return not OWNER_ID or (u and str(u.id) == OWNER_ID)
+
+
+async def send_post(chat_id, context, p: dict):
+    img, caption = await asyncio.to_thread(build_post, p)
+    pid = uuid.uuid4().hex[:10]
+    context.application.bot_data.setdefault("posts", {})[pid] = {
+        "product": p, "image": img, "caption": caption}
+    await context.bot.send_photo(chat_id, photo=img, caption=caption,
+                                 reply_markup=keyboard(pid))
+
+
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    urls = re.findall(r"https?://\S+", update.message.text or "")
+    if not urls:
+        await update.message.reply_text("ابعتلي لينك منتج أو صفحة عروض من أمازون مصر.")
+        return
+    chat_id = update.effective_chat.id
+    for raw in urls:
+        url = resolve(raw)
+        try:
+            asin = get_asin(url)
+            if asin:
+                asins = [asin]
+            else:
+                await update.message.reply_text("⏳ بحلل الصفحة...")
+                asins = await asyncio.to_thread(find_asins, url)
+            if not asins:
+                await update.message.reply_text("ملقيتش منتجات في اللينك ده.")
+                continue
+            for a in asins:
+                try:
+                    p = await asyncio.to_thread(scrape_product, a)
+                    await send_post(chat_id, context, p)
+                except Exception as e:
+                    await update.message.reply_text(f"❌ فشل المنتج {a}: {e}")
+                await asyncio.sleep(2)
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطأ: {e}")
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not allowed(update):
+        return
+    action, pid = q.data.split(":", 1)
+    post = context.application.bot_data.get("posts", {}).get(pid)
+    if not post:
+        await q.message.reply_text("البوست ده انتهت صلاحيته، ابعت اللينك تاني.")
+        return
+    if action == "pub":
+        if not CHANNEL_ID:
+            await q.message.reply_text("CHANNEL_ID مش متحدد في ملف .env")
+            return
+        try:
+            await context.bot.send_photo(CHANNEL_ID, photo=post["image"],
+                                         caption=post["caption"])
+            await q.message.reply_text("✅ اتنشر في القناة")
+        except Exception as e:
+            await q.message.reply_text(f"❌ فشل النشر: {e}")
+    elif action == "regen":
+        try:
+            await send_post(q.message.chat_id, context, post["product"])
+        except Exception as e:
+            await q.message.reply_text(f"❌ فشل التوليد: {e}")
+
+
+async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """اكتب /chatid في القناة (والبوت أدمن) ليرد برقم القناة."""
+    post = update.channel_post
+    if post and (post.text or "").startswith("/chatid"):
+        await context.bot.send_message(post.chat.id, f"CHANNEL_ID = {post.chat.id}")
+
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND
+                                   & filters.ChatType.PRIVATE, on_message))
+    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST,
+                                   on_channel_post))
+    print("Bot is running...")
+    app.run_polling()
 
 
 if __name__ == "__main__":
-    TOKEN = os.getenv("TELEGRAM_TOKEN")
-    if not TOKEN:
-        print("Error: TELEGRAM_TOKEN variable missing.")
-        raise SystemExit(1)
-
-    threading.Thread(target=run_web_server, daemon=True).start()
-
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-
-    print("Bot is running...")
-    app.run_polling()
+    main()
