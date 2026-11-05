@@ -1,22 +1,26 @@
 import os
-import re
 import random
 import threading
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
-from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 MY_TAG = "iexclusiveoff-21"
 
-# قوالب تسويقية احترافية ومتنوعة
+# 10 أساليب إعلانية مختلفة ومتجددة كلياً يتم اختيارها عشوائياً
 PROMO_TEMPLATES = [
     "🔥 **لقطة اليوم من أمازون!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن بسعر مميز من هنا:**\n{link}",
-    "⚡ **عرض حصري لفترة محدودة!**\n\n📌 **{title}**\n\n🛒 **رابط الشراء المباشر:**\n{link}",
-    "💎 **فرصة لا تعوض، الحق العرض!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن:**\n{link}",
-    "🚀 **من الأفضل مبيعاً والأعلى تقييماً!**\n\n📌 **{title}**\n\n🛒 **رابط الطلب والتفاصيل:**\n{link}"
+    "⚡ **عرض حصري لفترة محدودة! لا تفوت الفرصة.**\n\n📌 **{title}**\n\n🛒 **رابط الشراء المباشر:**\n{link}",
+    "💎 **صفقة ممتازة تستحق التجربة!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن من هنا:**\n{link}",
+    "🚀 **المنتج الأكثر طلباً والأعلى تقييماً!**\n\n📌 **{title}**\n\n🛒 **رابط الطلب والتفاصيل:**\n{link}",
+    "🎯 **اغتنم الفرصة ووفّر الآن!**\n\n📌 **{title}**\n\n🛒 **للتسوق والشراء:**\n{link}",
+    "🌟 **عرض جديد ومميز أضيف حديثاً!**\n\n📌 **{title}**\n\n🛒 **اضغط هنا لطلبه:**\n{link}",
+    "💡 **منتج ذكي وعملي لا غنى عنه!**\n\n📌 **{title}**\n\n🛒 **رابط العرض المباشر:**\n{link}",
+    "👑 **اخترنا لك الأفضل اليوم!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن من أمازون:**\n{link}",
+    "💥 **خصم قوي وتخفيض رائع!**\n\n📌 **{title}**\n\n🛒 **رابط الشراء:**\n{link}",
+    "✨ **اجعل حياتك أسهل مع هذا المنتج الرائع!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن من هنا:**\n{link}"
 ]
 
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -41,17 +45,16 @@ def build_affiliate_url(url: str) -> str:
     return urlunparse(parsed._replace(query=new_query))
 
 def fetch_details_via_proxy(url: str):
-    """جلب بيانات المنتج والصورة بعالية الجودة وتجنب الحظر"""
     clean_url = build_affiliate_url(url)
     try:
-        api_url = f"https://api.microlink.io?url={requests.utils.quote(clean_url)}&palette=true"
+        api_url = f"https://api.microlink.io?url={requests.utils.quote(clean_url)}"
         response = requests.get(api_url, timeout=12)
         data = response.json()
         
         if data.get("status") == "success":
             item = data.get("data", {})
+            # جلب العنوان بالكامل بدون قص أو حذف
             title = item.get("title") or "عرض حصري مميز من أمازون"
-            title = title.split("|")[0].replace("Amazon.eg", "").strip()
             
             image_url = None
             if item.get("image"):
@@ -74,7 +77,7 @@ def fetch_details_via_proxy(url: str):
     }
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً بك! أرسل لي رابط أمازون، وسأقوم بتجهيز البوست التسويقي بالصورة والعنوان فوراً.")
+    await update.message.reply_text("أهلاً بك! أرسل لي رابط أمازون، وسأقوم بإنشاء بوست تسويقي متجدد بالصورة والعنوان الكامل فوراً.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -86,11 +89,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text.startswith('http'):
         text = 'https://' + text
 
-    msg = await update.message.reply_text("⏳ جاري قراءة المنتج وجلب الصورة والأوصاف...")
+    msg = await update.message.reply_text("⏳ جاري قراءة المنتج بالكامل وتجهيز البوست...")
 
     prod_data = fetch_details_via_proxy(text)
     await msg.delete()
     
+    # اختيار قالب إعلاني عشوائي من الـ 10 طرق المختلفة
     template = random.choice(PROMO_TEMPLATES)
     caption = template.format(title=prod_data['title'], link=prod_data['link'])
     
