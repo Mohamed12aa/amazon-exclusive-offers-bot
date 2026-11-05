@@ -5,16 +5,18 @@ import threading
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
+from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 MY_TAG = "iexclusiveoff-21"
 
+# قوالب تسويقية احترافية ومتنوعة
 PROMO_TEMPLATES = [
     "🔥 **لقطة اليوم من أمازون!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن بسعر مميز من هنا:**\n{link}",
     "⚡ **عرض حصري لفترة محدودة!**\n\n📌 **{title}**\n\n🛒 **رابط الشراء المباشر:**\n{link}",
     "💎 **فرصة لا تعوض، الحق العرض!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن:**\n{link}",
-    "🚀 **من الأفضل مبيعاً والأعلي تقييماً!**\n\n📌 **{title}**\n\n🛒 **رابط الطلب والتفاصيل:**\n{link}"
+    "🚀 **من الأفضل مبيعاً والأعلى تقييماً!**\n\n📌 **{title}**\n\n🛒 **رابط الطلب والتفاصيل:**\n{link}"
 ]
 
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -38,56 +40,41 @@ def build_affiliate_url(url: str) -> str:
     new_query = urlencode(query_params, doseq=True)
     return urlunparse(parsed._replace(query=new_query))
 
-def fetch_product_info(url: str):
-    """استخدام خدمة معاينة الروابط الموثوقة لجلب العنوان والصورة الحقيقية دون حظر"""
+def fetch_details_via_proxy(url: str):
+    """جلب بيانات المنتج والصورة بعالية الجودة وتجنب الحظر"""
     clean_url = build_affiliate_url(url)
     try:
-        # استخدام خدمة مجانية آمنة لجلب بيانات الرابط (OpenGraph)
-        api_url = f"https://api.microlink.io?url={requests.utils.quote(clean_url)}"
-        response = requests.get(api_url, timeout=10)
+        api_url = f"https://api.microlink.io?url={requests.utils.quote(clean_url)}&palette=true"
+        response = requests.get(api_url, timeout=12)
         data = response.json()
         
         if data.get("status") == "success":
             item = data.get("data", {})
             title = item.get("title") or "عرض حصري مميز من أمازون"
-            # تنظيف العنوان
-            title = title.split("|")[0].strip()
+            title = title.split("|")[0].replace("Amazon.eg", "").strip()
             
-            image_info = item.get("image")
-            image_url = image_info.get("url") if image_info else None
-            
+            image_url = None
+            if item.get("image"):
+                image_url = item["image"].get("url")
+            elif item.get("logo"):
+                image_url = item["logo"].get("url")
+                
             return {
                 "title": title,
                 "image": image_url,
                 "link": clean_url
             }
     except Exception as e:
-        print(f"API Error: {e}")
+        print(f"Fetch Error: {e}")
         
     return {
-        "title": "عرض حصري ومميز من أمازون",
+        "title": "عرض خاص ومميز من أمازون",
         "image": None,
         "link": clean_url
     }
 
-def extract_products_from_event_page(url: str):
-    products = []
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        response = requests.get(url, headers=headers, timeout=15)
-        asins = list(set(re.findall(r'/dp/([A-Z0-9]{10})', response.text)))
-        domain = urlparse(url).netloc or "www.amazon.eg"
-        
-        for asin in asins[:12]:
-            prod_url = f"https://{domain}/dp/{asin}"
-            prod_data = fetch_product_info(prod_url)
-            products.append(prod_data)
-    except Exception as e:
-        print(f"Event page error: {e}")
-    return products
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً بك! أرسل لي رابط منتج أو صفحة عروض، وسأقوم بإنشاء البوست التسويقي بالصورة والعنوان فوراً.")
+    await update.message.reply_text("أهلاً بك! أرسل لي رابط أمازون، وسأقوم بتجهيز البوست التسويقي بالصورة والعنوان فوراً.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -99,50 +86,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text.startswith('http'):
         text = 'https://' + text
 
-    msg = await update.message.reply_text("⏳ جاري سحب تفاصيل المنتج والصورة بدقة...")
+    msg = await update.message.reply_text("⏳ جاري قراءة المنتج وجلب الصورة والأوصاف...")
 
-    if "/events/" in text or "promotions" in text or "ref_=nav_cs" in text:
-        products = extract_products_from_event_page(text)
-        await msg.delete()
-        
-        if not products:
-            aff_link = build_affiliate_url(text)
-            await update.message.reply_text(f"🔥 **رابط صفحة العروض:**\n\n{aff_link}")
+    prod_data = fetch_details_via_proxy(text)
+    await msg.delete()
+    
+    template = random.choice(PROMO_TEMPLATES)
+    caption = template.format(title=prod_data['title'], link=prod_data['link'])
+    
+    if prod_data.get('image'):
+        try:
+            await update.message.reply_photo(photo=prod_data['image'], caption=caption, parse_mode="Markdown")
             return
-        
-        await update.message.reply_text(f"✅ تم العثور على {len(products)} منتج، إليك البوستات:")
-        
-        for prod in products:
-            template = random.choice(PROMO_TEMPLATES)
-            caption = template.format(title=prod['title'], link=prod['link'])
+        except Exception as e:
+            print(f"Photo send error: {e}")
             
-            if prod.get('image'):
-                try:
-                    await update.message.reply_photo(photo=prod['image'], caption=caption, parse_mode="Markdown")
-                    continue
-                except Exception:
-                    pass
-            await update.message.reply_text(caption, parse_mode="Markdown")
-            
-    else:
-        prod_data = fetch_product_info(text)
-        await msg.delete()
-        
-        template = random.choice(PROMO_TEMPLATES)
-        caption = template.format(title=prod_data['title'], link=prod_data['link'])
-        
-        if prod_data.get('image'):
-            try:
-                await update.message.reply_photo(photo=prod_data['image'], caption=caption, parse_mode="Markdown")
-            except Exception:
-                await update.message.reply_text(caption, parse_mode="Markdown")
-        else:
-            await update.message.reply_text(caption, parse_mode="Markdown")
+    await update.message.reply_text(caption, parse_mode="Markdown")
 
 if __name__ == '__main__':
     TOKEN = os.getenv("TELEGRAM_TOKEN")
     if not TOKEN:
-        print("Error: TELEGRAM_TOKEN environment variable is missing.")
+        print("Error: TELEGRAM_TOKEN variable missing.")
         exit(1)
     
     t = threading.Thread(target=run_web_server)
