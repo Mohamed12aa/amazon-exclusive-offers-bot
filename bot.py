@@ -11,17 +11,21 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 
 MY_TAG = "iexclusiveoff-21"
 
+# هيدرز متقدمة جداً لمحاكاة متصفح حقيقي وتجاوز حماية أمازون
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1"
 }
 
-# قوالب تسويقية متنوعة ومتجددة باستمرار لتغيير أسلوب الإعلان
 PROMO_TEMPLATES = [
-    "🔥 **لقطة اليوم من أمازون!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن بسعر مميز من هنا:**\n`{link}`",
-    "⚡ **عرض حصري لفترة محدودة!**\n\n📌 **{title}**\n\n🛒 **رابط الشراء المباشر:**\n`{link}`",
-    "💎 **فرصة لا تعوض، الحق العرض!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن:**\n`{link}`",
-    "🚀 **من الأفضل مبيعاً والأعلي تقييماً!**\n\n📌 **{title}**\n\n🛒 **رابط الطلب والتفاصيل:**\n`{link}`"
+    "🔥 **لقطة اليوم من أمازون!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن بسعر مميز من هنا:**\n{link}",
+    "⚡ **عرض حصري لفترة محدودة!**\n\n📌 **{title}**\n\n🛒 **رابط الشراء المباشر:**\n{link}",
+    "💎 **فرصة لا تعوض، الحق العرض!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن:**\n{link}",
+    "🚀 **من الأفضل مبيعاً والأعلي تقييماً!**\n\n📌 **{title}**\n\n🛒 **رابط الطلب والتفاصيل:**\n{link}"
 ]
 
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -45,59 +49,75 @@ def build_affiliate_url(url: str) -> str:
     new_query = urlencode(query_params, doseq=True)
     return urlunparse(parsed._replace(query=new_query))
 
-def scrape_single_product(url: str):
-    """جلب تفاصيل المنتج بدقة تامة (العنوان والصورة والرابط)"""
+def scrape_product_metadata(url: str):
+    """استخراج العنوان والصورة الحقيقية باستخدام وسائط OpenGraph لتجنب الحظر"""
     try:
         clean_url = build_affiliate_url(url)
-        res = requests.get(clean_url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(res.text, 'html.parser')
+        response = requests.get(clean_url, headers=HEADERS, timeout=12)
         
-        # استخراج العنوان
-        title_elem = soup.find(id="productTitle")
-        title = title_elem.get_text().strip() if title_elem else "منتج مميز من أمازون"
+        if response.status_code != 200:
+            return {"title": "عروض حصرية مميزة من أمازون", "image": None, "link": clean_url}
+
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        # استخراج الصورة بدقة من أمازون
-        img_url = None
-        img_elem = soup.find(id="landingImage") or soup.find(id="imgBlkFront")
-        if img_elem:
-            img_url = img_elem.get('data-old-hires') or img_elem.get('src')
-        else:
-            # طريقة بديلة للبحث عن الصورة إذا لم تكن في العناصر السابقة
-            dynamic_img = soup.select_Fills if hasattr(soup, 'select_one') else None
-            img_tag = soup.select_one("#landingImage")
-            if img_tag:
-                img_url = img_tag.get('src')
+        # 1. البحث عن العنوان بطرق متعددة
+        title = None
+        og_title = soup.find("meta", property="og:title")
+        if og_title and og_title.get("content"):
+            title = og_title.get("content").strip()
+        
+        if not title:
+            title_elem = soup.find(id="productTitle")
+            if title_elem:
+                title = title_elem.get_text().strip()
                 
+        if not title:
+            title = "عرض خاص ومميز من أمازون"
+            
+        # تنظيف عنوان أمازون الطويل إذا لزم الأمر
+        title = title.split("|")[0].strip()
+
+        # 2. البحث عن الصورة الحقيقية بطرق متعددة (من ضمنها OpenGraph التي لا يحظرها أمازون)
+        img_url = None
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            img_url = og_image.get("content").strip()
+            
+        if not img_url:
+            img_elem = soup.find(id="landingImage")
+            if img_elem:
+                img_url = img_elem.get('data-old-hires') or img_elem.get('src')
+
         return {
             'title': title,
             'image': img_url,
             'link': clean_url
         }
     except Exception as e:
-        print(f"Error scraping product: {e}")
-        return None
+        print(f"Scraping error: {e}")
+        return {
+            'title': "عرض خاص ومميز من أمازون",
+            'image': None,
+            'link': build_affiliate_url(url)
+        }
 
 def extract_products_from_event_page(url: str):
-    """استخراج المنتجات من صفحة العروض بدقة"""
     products = []
     try:
-        res = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        asins = list(set(re.findall(r'/dp/([A-Z0-9]{10})', res.text)))
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        asins = list(set(re.findall(r'/dp/([A-Z0-9]{10})', response.text)))
         domain = urlparse(url).netloc or "www.amazon.eg"
         
         for asin in asins[:15]:
             prod_url = f"https://{domain}/dp/{asin}"
-            prod_data = scrape_single_product(prod_url)
-            if prod_data and prod_data['title'] != "منتج مميز من أمازون":
-                products.append(prod_data)
+            prod_data = scrape_product_metadata(prod_url)
+            products.append(prod_data)
     except Exception as e:
-        print(f"Error scraping event page: {e}")
+        print(f"Event page error: {e}")
     return products
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً بك! أرسل لي رابط منتج أو صفحة عروض، وسأقوم بإنشاء البوستات التسويقية المتجددة فوراً.")
+    await update.message.reply_text("أهلاً بك! أرسل لي رابط منتج أو صفحة عروض، وسأقوم بإنشاء بوست احترافي بالصورة والعنوان ورابط الإحالة فوراً.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -109,7 +129,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text.startswith('http'):
         text = 'https://' + text
 
-    msg = await update.message.reply_text("⏳ جاري قراءة الرابط وسحب الصور وتجهيز البوست...")
+    msg = await update.message.reply_text("⏳ جاري سحب بيانات المنتج والصورة وتجهيز البوست...")
 
     if "/events/" in text or "promotions" in text or "ref_=nav_cs" in text:
         products = extract_products_from_event_page(text)
@@ -120,10 +140,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🔥 **رابط صفحة العروض:**\n\n{aff_link}")
             return
         
-        await update.message.reply_text(f"✅ تم العثور على {len(products)} منتج، إليك البوستات بتصميم متجدد:")
+        await update.message.reply_text(f"✅ تم العثور على {len(products)} منتج، إليك البوستات:")
         
         for prod in products:
-            # اختيار قالب عشوائي ليتغير الأسلوب والأسلوب الإعلاني باستمرار
             template = random.choice(PROMO_TEMPLATES)
             caption = template.format(title=prod['title'], link=prod['link'])
             
@@ -136,23 +155,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(caption, parse_mode="Markdown")
             
     else:
-        prod_data = scrape_single_product(text)
+        prod_data = scrape_product_metadata(text)
         await msg.delete()
         
-        if prod_data:
-            template = random.choice(PROMO_TEMPLATES)
-            caption = template.format(title=prod_data['title'], link=prod_data['link'])
-            
-            if prod_data['image']:
-                try:
-                    await update.message.reply_photo(photo=prod_data['image'], caption=caption, parse_mode="Markdown")
-                except Exception:
-                    await update.message.reply_text(caption, parse_mode="Markdown")
-            else:
+        template = random.choice(PROMO_TEMPLATES)
+        caption = template.format(title=prod_data['title'], link=prod_data['link'])
+        
+        if prod_data.get('image'):
+            try:
+                await update.message.reply_photo(photo=prod_data['image'], caption=caption, parse_mode="Markdown")
+            except Exception:
                 await update.message.reply_text(caption, parse_mode="Markdown")
         else:
-            clean_link = build_affiliate_url(text)
-            await update.message.reply_text(f"🔥 **إليك الرابط الترويجي:**\n\n{clean_link}")
+            await update.message.reply_text(caption, parse_mode="Markdown")
 
 if __name__ == '__main__':
     TOKEN = os.getenv("TELEGRAM_TOKEN")
