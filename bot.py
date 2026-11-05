@@ -67,14 +67,11 @@ def extract_products_from_event_page(url: str):
         res = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # البحث عن كل أكواد ASIN الفريدة في الصفحة بالكامل بدون تقييد بـ 10 فقط
         asins = list(set(re.findall(r'/dp/([A-Z0-9]{10})', res.text)))
         domain = urlparse(url).netloc or "www.amazon.eg"
         
-        # نقوم بمعالجة المنتجات (نحدد حد أقصى أماناً 25 منتجاً حتى لا يتأخر البوت كثيراً في الرد)
         for asin in asins[:25]:
             prod_url = f"https://{domain}/dp/{asin}"
-            # جلب تفاصيل كل منتج لضمان الحصول على اسمه الحقيقي
             prod_data = scrape_single_product(prod_url)
             if prod_data and prod_data['title'] != "منتج مميز من أمازون":
                 products.append(prod_data)
@@ -103,7 +100,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.message.reply_text("⏳ جاري قراءة الروابط وجلب تفاصيل المنتجات...")
 
-    # التحقق مما إذا كانت صفحة عروض أو فعاليات
     if "/events/" in text or "promotions" in text or "ref_=nav_cs" in text:
         products = extract_products_from_event_page(text)
         await msg.delete()
@@ -113,7 +109,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🔥 **رابط صفحة العروض:**\n\n{aff_link}")
             return
         
-        await update.message.reply_text(اغرف={`✅ تم العثور على ${len(products)} منتج في الصفحة، جاري إرسالها:`})
+        await update.message.reply_text(f"✅ تم العثور على {len(products)} منتج في الصفحة، جاري إرسالها:")
         
         for prod in products:
             caption = f"🔥 **عرض خاص ومميز!**\n\n📌 {prod['title']}\n\n🛒 **اطلبه الآن من هنا:**\n`{prod['link']}`"
