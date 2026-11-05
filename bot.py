@@ -1,10 +1,20 @@
 import os
+import re
 import threading
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import requests
+from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 MY_TAG = "iexclusiveoff-21"
+
+# إعدادات التصفح لمحاكاة المتصفح وتجنب حظر أمازون
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+    "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+}
 
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -18,39 +28,113 @@ def run_web_server():
     server = HTTPServer(('0.0.0.0', port), SimpleHandler)
     server.serve_forever()
 
+def build_affiliate_url(url: str) -> str:
+    """إضافة كود التتبع tag=iexclusiveoff-21 للرابط"""
+    parsed = urlparse(url)
+    query_params = parse_qs(parsed.query)
+    query_params['tag'] = [MY_TAG]
+    if 'ascsubtag' in query_params:
+        del query_params['ascsubtag']
+    new_query = urlencode(query_params, doseq=True)
+    return urlunparse(parsed._replace(query=new_query))
+
+def scrape_single_product(url: str):
+    """جلب تفاصيل المنتج الفردي (العنوان، الصورة، رابط الإحالة)"""
+    try:
+        clean_url = build_affiliate_url(url)
+        res = requests.get(clean_url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # استخراج العنوان
+        title_elem = soup.find(id="productTitle")
+        title = title_elem.get_text().strip() if title_elem else "منتج مميز من أمازون"
+        
+        # استخراج الصورة الرئيسية
+        img_url = None
+        img_elem = soup.find(id="landingImage") or soup.find(id="imgBlkFront")
+        if img_elem:
+            img_url = img_elem.get('data-old-hires') or img_elem.get('src')
+        
+        return {
+            'title': title,
+            'image': img_url,
+            'link': clean_url
+        }
+    except Exception as e:
+        print(f"Error scraping product: {e}")
+        return None
+
+def extract_products_from_event_page(url: str):
+    """استخراج جميع المنتجات من صفحة الفعاليات/العروض"""
+    products = []
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # البحث عن كل الأكواد (ASIN) داخل الصفحة
+        asins = set(re.findall(r'/dp/([A-Z0-9]{10})', res.text))
+        
+        domain = urlparse(url).netloc or "www.amazon.eg"
+        
+        for asin in list(asins)[:10]:  # معالجة أول 10 منتجات لعدم استهلاك الموارد بكثرة
+            prod_url = f"https://{domain}/dp/{asin}?tag={MY_TAG}"
+            # استخراج العناوين أو الصور إن أمكن من الصفحة العامة
+            products.append({
+                'title': f"عرض خاص على منتج أمازون ({asin})",
+                'link': prod_url,
+                'image': None
+            })
+    except Exception as e:
+        print(f"Error scraping event page: {e}")
+    return products
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً بك! أرسل لي أي رابط أمازون وسأقوم بتنظيفه وإضافة كود الإحالة الخاص بك فوراً.")
+    await update.message.reply_text("أهلاً بك! أرسل لي رابط منتج أو صفحة عروض من أمازون، وسأقوم بإنشاء البوستات التسويقية الجاهزة فوراً.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if "amazon." in text.lower():
-        try:
-            if not text.startswith('http'):
-                text = 'https://' + text
-            
-            if "dp/" in text or "gp/product/" in text:
-                asin_match = text.split("/dp/")[1].split("/")[0] if "/dp/" in text else text.split("/gp/product/")[1].split("/")[0]
-                asin = asin_match[:10]
-                domain = text.split("/")[2]
-                clean_link = f"https://{domain}/dp/{asin}?tag={MY_TAG}"
-            else:
-                from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-                parsed_url = urlparse(text)
-                query_params = parse_qs(parsed_url.query)
-                query_params['tag'] = [MY_TAG]
-                if 'ascsubtag' in query_params: del query_params['ascsubtag']
-                
-                new_query = urlencode(query_params, doseq=True)
-                parsed_url = parsed_url._replace(query=new_query)
-                clean_link = urlunparse(parsed_url)
+    text = update.message.text.strip()
+    
+    if "amazon." not in text.lower():
+        await update.message.reply_text("من فضلك أرسل رابط أمازون صالح.")
+        return
 
-            response_text = f"🔥 **إليك الرابط الترويجي الجاهز:**\n\n`{clean_link}`\n\n🏷 تم دمج كود التتبع: `{MY_TAG}`"
-            await update.message.reply_text(response_text, parse_mode="Markdown")
+    if not text.startswith('http'):
+        text = 'https://' + text
+
+    msg = await update.message.reply_text("⏳ جاري قراءة الرابط وتجهيز البوست التسويقي...")
+
+    # حالة صفحة العروض / الفعاليات (مثل events/double11)
+    if "/events/" in text or "promotions" in text:
+        products = extract_products_from_event_page(text)
+        if not products:
+            aff_link = build_affiliate_url(text)
+            await msg.edit_text(f"🔥 **صفحة عروض وتخفيضات خاصة:**\n\n🔗 {aff_link}")
+            return
+        
+        await msg.edit_text(f"✅ تم العثور على {len(products)} منتج! جاري إرسال البوستات...")
+        
+        for prod in products:
+            caption = f"🔥 **عرض خاص ومميز!**\n\n📌 {prod['title']}\n\n🛒 **اطلبه الآن من هنا:**\n{prod['link']}"
+            await update.message.reply_text(caption, parse_mode="Markdown")
             
-        except Exception as e:
-            await update.message.reply_text("عذراً، لم أستطع معالجة هذا الرابط، تأكد أنه رابط أمازون صحيح.")
+    # حالة رابط منتج واحد (dp/ أو gp/product/)
     else:
-        await update.message.reply_text("من فضلك أرسل رابط أمازون صالح لتوليد رابط الإحالة.")
+        prod_data = scrape_single_product(text)
+        await msg.delete()
+        
+        if prod_data:
+            caption = f"🔥 **عرض خاص على {prod_data['title']}**\n\n🛒 **للشراء والطلب عبر الرابط التالي:**\n`{prod_data['link']}`"
+            
+            if prod_data['image']:
+                try:
+                    await update.message.reply_photo(photo=prod_data['image'], caption=caption, parse_mode="Markdown")
+                except Exception:
+                    await update.message.reply_text(caption, parse_mode="Markdown")
+            else:
+                await update.message.reply_text(caption, parse_mode="Markdown")
+        else:
+            clean_link = build_affiliate_url(text)
+            await update.message.reply_text(f"🔥 **إليك الرابط الترويجي:**\n\n{clean_link}")
 
 if __name__ == '__main__':
     TOKEN = os.getenv("TELEGRAM_TOKEN")
