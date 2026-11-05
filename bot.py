@@ -1,5 +1,6 @@
 import os
 import re
+import random
 import threading
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -14,6 +15,14 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
     "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
 }
+
+# قوالب تسويقية متنوعة ومتجددة باستمرار لتغيير أسلوب الإعلان
+PROMO_TEMPLATES = [
+    "🔥 **لقطة اليوم من أمازون!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن بسعر مميز من هنا:**\n`{link}`",
+    "⚡ **عرض حصري لفترة محدودة!**\n\n📌 **{title}**\n\n🛒 **رابط الشراء المباشر:**\n`{link}`",
+    "💎 **فرصة لا تعوض، الحق العرض!**\n\n📌 **{title}**\n\n🛒 **اطلبه الآن:**\n`{link}`",
+    "🚀 **من الأفضل مبيعاً والأعلي تقييماً!**\n\n📌 **{title}**\n\n🛒 **رابط الطلب والتفاصيل:**\n`{link}`"
+]
 
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -37,20 +46,28 @@ def build_affiliate_url(url: str) -> str:
     return urlunparse(parsed._replace(query=new_query))
 
 def scrape_single_product(url: str):
-    """جلب تفاصيل المنتج الفردي بدقة (العنوان، الصورة، الرابط)"""
+    """جلب تفاصيل المنتج بدقة تامة (العنوان والصورة والرابط)"""
     try:
         clean_url = build_affiliate_url(url)
         res = requests.get(clean_url, headers=HEADERS, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
         
+        # استخراج العنوان
         title_elem = soup.find(id="productTitle")
         title = title_elem.get_text().strip() if title_elem else "منتج مميز من أمازون"
         
+        # استخراج الصورة بدقة من أمازون
         img_url = None
         img_elem = soup.find(id="landingImage") or soup.find(id="imgBlkFront")
         if img_elem:
             img_url = img_elem.get('data-old-hires') or img_elem.get('src')
-        
+        else:
+            # طريقة بديلة للبحث عن الصورة إذا لم تكن في العناصر السابقة
+            dynamic_img = soup.select_Fills if hasattr(soup, 'select_one') else None
+            img_tag = soup.select_one("#landingImage")
+            if img_tag:
+                img_url = img_tag.get('src')
+                
         return {
             'title': title,
             'image': img_url,
@@ -61,7 +78,7 @@ def scrape_single_product(url: str):
         return None
 
 def extract_products_from_event_page(url: str):
-    """استخراج جميع المنتجات من صفحة العروض مع جلب تفاصيلها الحقيقية"""
+    """استخراج المنتجات من صفحة العروض بدقة"""
     products = []
     try:
         res = requests.get(url, headers=HEADERS, timeout=15)
@@ -70,23 +87,17 @@ def extract_products_from_event_page(url: str):
         asins = list(set(re.findall(r'/dp/([A-Z0-9]{10})', res.text)))
         domain = urlparse(url).netloc or "www.amazon.eg"
         
-        for asin in asins[:25]:
+        for asin in asins[:15]:
             prod_url = f"https://{domain}/dp/{asin}"
             prod_data = scrape_single_product(prod_url)
             if prod_data and prod_data['title'] != "منتج مميز من أمازون":
                 products.append(prod_data)
-            else:
-                products.append({
-                    'title': f"عرض مميز من أمازون",
-                    'link': build_affiliate_url(prod_url),
-                    'image': None
-                })
     except Exception as e:
         print(f"Error scraping event page: {e}")
     return products
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً بك! أرسل لي رابط منتج فردي أو صفحة عروض، وسأقوم بتجهيز البوستات التسويقية فوراً.")
+    await update.message.reply_text("أهلاً بك! أرسل لي رابط منتج أو صفحة عروض، وسأقوم بإنشاء البوستات التسويقية المتجددة فوراً.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -98,7 +109,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text.startswith('http'):
         text = 'https://' + text
 
-    msg = await update.message.reply_text("⏳ جاري قراءة الروابط وجلب تفاصيل المنتجات...")
+    msg = await update.message.reply_text("⏳ جاري قراءة الرابط وسحب الصور وتجهيز البوست...")
 
     if "/events/" in text or "promotions" in text or "ref_=nav_cs" in text:
         products = extract_products_from_event_page(text)
@@ -109,10 +120,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🔥 **رابط صفحة العروض:**\n\n{aff_link}")
             return
         
-        await update.message.reply_text(f"✅ تم العثور على {len(products)} منتج في الصفحة، جاري إرسالها:")
+        await update.message.reply_text(f"✅ تم العثور على {len(products)} منتج، إليك البوستات بتصميم متجدد:")
         
         for prod in products:
-            caption = f"🔥 **عرض خاص ومميز!**\n\n📌 {prod['title']}\n\n🛒 **اطلبه الآن من هنا:**\n`{prod['link']}`"
+            # اختيار قالب عشوائي ليتغير الأسلوب والأسلوب الإعلاني باستمرار
+            template = random.choice(PROMO_TEMPLATES)
+            caption = template.format(title=prod['title'], link=prod['link'])
             
             if prod.get('image'):
                 try:
@@ -127,7 +140,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.delete()
         
         if prod_data:
-            caption = f"🔥 **عرض خاص ومميز!**\n\n📌 {prod_data['title']}\n\n🛒 **اطلبه الآن من هنا:**\n`{prod_data['link']}`"
+            template = random.choice(PROMO_TEMPLATES)
+            caption = template.format(title=prod_data['title'], link=prod_data['link'])
             
             if prod_data['image']:
                 try:
