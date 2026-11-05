@@ -98,13 +98,20 @@ def is_blocked(text: str) -> bool:
             or "api-services-support@amazon.com" in t)
 
 
+LAST_REASON = {"msg": ""}
+
+
 def fetch_html(url: str):
     """يجيب الصفحة مباشرة، ولو أمازون حجبت يجرب ScraperAPI (لو متفعّل)."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
         if r.status_code == 200 and not is_blocked(r.text):
             return r.text
+        reason = f"أمازون رجّعت كود {r.status_code}" + (" (صفحة captcha)" if is_blocked(r.text) else "")
+        LAST_REASON["msg"] = reason
+        print("Direct fetch failed:", reason, url)
     except Exception as e:
+        LAST_REASON["msg"] = f"خطأ اتصال: {e}"
         print("Direct fetch error:", e)
 
     if SCRAPER_API_KEY:
@@ -112,13 +119,40 @@ def fetch_html(url: str):
             r = requests.get(
                 "https://api.scraperapi.com/",
                 params={"api_key": SCRAPER_API_KEY, "url": url},
-                timeout=60,
+                timeout=70,
             )
             if r.status_code == 200 and not is_blocked(r.text):
                 return r.text
+            LAST_REASON["msg"] = f"ScraperAPI رجّع كود {r.status_code}"
+            print("Scraper failed:", r.status_code, r.text[:200])
         except Exception as e:
+            LAST_REASON["msg"] = f"خطأ ScraperAPI: {e}"
             print("Scraper fetch error:", e)
     return None
+
+
+def microlink_product(host: str, asin: str):
+    """بديل احتياطي لو أمازون حجبت: Microlink (مع فلترة النتائج الغلط)."""
+    try:
+        r = requests.get("https://api.microlink.io", params={"url": f"https://{host}/dp/{asin}"}, timeout=25)
+        d = r.json()
+        if d.get("status") != "success":
+            LAST_REASON["msg"] += f" | Microlink: {d.get('message', 'فشل')}"
+            return None
+        item = d.get("data", {})
+        title = (item.get("title") or "").strip()
+        bad = ("robot check", "sorry", "page not found", "captcha", "عذراً", "عذرا")
+        if not title or any(b in title.lower() for b in bad) or len(title) < 8:
+            LAST_REASON["msg"] += " | Microlink رجّع عنوان غير صالح"
+            return None
+        title = re.sub(r"^Amazon\.[a-z.]+\s*:\s*", "", title, flags=re.I)
+        img = (item.get("image") or {}).get("url")
+        if img and "/images/I/" not in img:   # يرفض اللوجو وأي صورة مش للمنتج
+            img = None
+        return {"asin": asin, "title": title, "image": img, "price": None, "link": affiliate_url(host, asin)}
+    except Exception as e:
+        LAST_REASON["msg"] += f" | Microlink error: {e}"
+        return None
 
 
 # ----------------------------- قراءة المنتج -----------------------------
@@ -145,7 +179,7 @@ def pick_image(soup: BeautifulSoup):
 def get_product(host: str, asin: str):
     page = fetch_html(f"https://{host}/dp/{asin}")
     if not page:
-        return None
+        return microlink_product(host, asin)
     soup = BeautifulSoup(page, "html.parser")
 
     t = soup.select_one("#productTitle")
@@ -154,7 +188,8 @@ def get_product(host: str, asin: str):
         og = soup.find("meta", property="og:title")
         title = og["content"].strip() if og and og.get("content") else None
     if not title:
-        return None
+        LAST_REASON["msg"] = "الصفحة اتحملت بس مفيهاش عنوان منتج"
+        return microlink_product(host, asin)
 
     price = None
     if SHOW_PRICE:
@@ -314,7 +349,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if total == 0:
         await update.message.reply_text(
-            "❌ معرفتش أقرا بيانات المنتج (أمازون حجبت الطلب أو الرابط مش لمنتج). جرّب تاني بعد شوية."
+            "❌ معرفتش أقرا بيانات المنتج.\n"
+            f"السبب: {LAST_REASON['msg'] or 'الرابط مش لمنتج أو صفحة عروض ما فيهاش منتجات ظاهرة'}"
         )
 
 
