@@ -76,9 +76,8 @@ TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "").strip()
 
 OWNER_ID_RAW = os.getenv("OWNER_ID", "").strip()
 
-TEXT_MODEL = os.getenv("TEXT_MODEL", "gemini-2.5-flash")
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gemini-2.5-flash-image")
-
+TEXT_MODEL = os.getenv("TEXT_MODEL", "gemini-1.5-flash")
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gemini-1.5-flash")
 
 # ==================================================
 # 3. التأكد من وجود المتغيرات
